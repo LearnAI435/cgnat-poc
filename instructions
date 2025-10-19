@@ -1,0 +1,113 @@
+4) Explanation of important parts (walkthrough)
+
+Public IP pool & port slots
+
+pubips[] holds each public IPv4 in network order and a slots bitmap array for ports MIN_PORT..MAX_PORT. alloc_public_port() searches for the first free slot; free_public_port() releases it.
+
+Mapping structure
+
+mapping_key is the tuple of private address/port, remote address/port, and proto. Mappings are stored in map_table hashed by that key (via uthash).
+
+Each mapping stores which public ip index and public port were assigned and the last_seen timestamp.
+
+Packet classification
+
+The code uses a simple RFC1918 check to decide if a packet is outbound (source in private range) or inbound (destination is one of our public IPs). This detects direction in a basic way.
+
+SNAT for outbound
+
+If a mapping does not exist yet, alloc_public_port() picks a free port across the pool. We then create_mapping() and rewrite the IP/port fields in the packet, recompute L4 and IP checksums, and accept the modified packet.
+
+DNAT for inbound
+
+For inbound packets with destination equal to one of the public IPs, we look up the mapping by (pub_ip_idx, dest_port, proto) and rewrite the packet destination to the private tuple.
+
+Timeouts and cleanup
+
+A thread runs periodically and removes mappings older than TCP_TIMEOUT or UDP_TIMEOUT. On removal, the corresponding public port is freed for reuse.
+
+Checksums
+
+IP header checksum and TCP/UDP pseudoheader checksums are recomputed whenever we change addresses or ports.
+
+5) Limitations & what you must add for a production product
+
+This prototype is intentionally simple — to turn it into a product that can handle 20k customers on 10 IPs (or more), you would need to:
+
+Performance:
+
+Move to kernel-space (netfilter kernel module) or use high-performance dataplane (DPDK, XDP, eBPF) to handle tens/hundreds of Gbps.
+
+Use efficient port allocation (e.g., per-subscriber deterministic port ranges, hashed allocation) rather than linear search.
+
+Scalability:
+
+Use lock-free or sharded maps, avoid a single global mutex.
+
+Pre-allocate mapping slab memory and use optimized memory pools.
+
+Correctness:
+
+Handle fragmented packets, ICMP, GRE, and other L4 protocols.
+
+Implement full TCP state tracking (SYN, FIN, RST detection) for correct timeouts.
+
+NAT helper strategies for SIP, FTP, etc. or use application proxies.
+
+Logging and lawful intercept (store mapping logs with timestamps reliably).
+
+Security & robustness:
+
+Harden against resource exhaustion (malicious port scanning, connection floods).
+
+Rate limit allocation, per-subscriber quotas, per-subscriber port blocks.
+
+Use secure coding (avoiding overflows) and thorough tests.
+
+Management features:
+
+Configurable port block assignment (per-subscriber static block) for those requiring more ports.
+
+API to request port forwarding or dedicated public IPs.
+
+Metrics, telemetry, and admin UI.
+
+HA & distributed NAT:
+
+In carriers, NAT clusters often share state across boxes (state synchronization) or use consistent hashing to keep flows sticky.
+
+Consider state replication or stateless approaches (e.g., mapping key derivation from subscriber ID + hash) if you deploy multiple nodes.
+
+6) How 10 public IPs can cover 20k customers (numbers recap)
+
+Each public IP exposes ~65,535 TCP/UDP ports.
+
+10 public IPs → 655,350 port slots.
+
+20,000 subscribers → ~32 ports average per subscriber (if evenly allocated).
+
+With dynamic reuse and short timeouts (e.g., UDP 60s), this is workable for typical consumer behavior. But heavy users or P2P/gaming/VoIP need different strategies (port blocks or dedicated IPs).
+
+7) Next steps & features I can add for you (choose any and I’ll expand code)
+
+Per-subscriber deterministic port blocks and subscriber authentication (map subscriber -> port block).
+
+Better allocation algorithm (hashed by subscriber IP to spread load evenly).
+
+TCP stateful handling (track SYN/FIN/RST and use smarter timeouts).
+
+Logging/rotation for mapping entries (for law enforcement requirements).
+
+Replace nfqueue with XDP/eBPF or DPDK-based data plane for performance.
+
+Unit tests and stress test scripts (using hping3, wrk, iperf).
+
+8) Safety, legal & operational notes
+
+NAT implementations can affect customer connectivity. Test in isolated lab first.
+
+If you deploy at scale, you must keep mapping logs as per local lawful interception/regulatory retention requirements — that can be large (millions of entries per hour).
+
+Running this code requires root and control over routing/iptables.
+
+This code is allowed to be shared; however, deploying network-intercepting software on networks you don't own could be illegal. Only run on infrastructure where you have permission.
